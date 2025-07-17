@@ -1,52 +1,6 @@
---- Developed using LifeBoatAPI - Stormworks Lua plugin for VSCode - https://code.visualstudio.com/download (search "Stormworks Lua with LifeboatAPI" extension)
---- If you have any issues, please report them here: https://github.com/nameouschangey/STORMWORKS_VSCodeExtension/issues - by Nameous Changey
-
-
---[====[ HOTKEYS ]====]
--- Press F6 to simulate this file
--- Press F7 to build the project, copy the output from /_build/out/ into the game to use
--- Remember to set your Author name etc. in the settings: CTRL+COMMA
-
-
---[====[ EDITABLE SIMULATOR CONFIG - *automatically removed from the F7 build output ]====]
----@section __LB_SIMULATOR_ONLY__
-do
-    ---@type Simulator -- Set properties and screen sizes here - will run once when the script is loaded
-    simulator = simulator
-    simulator:setScreen(1, "3x3")
-    simulator:setProperty("ExampleNumberProperty", 123)
-
-    -- Runs every tick just before onTick; allows you to simulate the inputs changing
-    ---@param simulator Simulator Use simulator:<function>() to set inputs etc.
-    ---@param ticks     number Number of ticks since simulator started
-    function onLBSimulatorTick(simulator, ticks)
-        -- touchscreen defaults
-        local screenConnection = simulator:getTouchScreen(1)
-        simulator:setInputBool(1, screenConnection.isTouched)
-        simulator:setInputNumber(1, screenConnection.width)
-        simulator:setInputNumber(2, screenConnection.height)
-        simulator:setInputNumber(3, screenConnection.touchX)
-        simulator:setInputNumber(4, screenConnection.touchY)
-
-        -- NEW! button/slider options from the UI
-        simulator:setInputBool(31, simulator:getIsClicked(1))     -- if button 1 is clicked, provide an ON pulse for input.getBool(31)
-        simulator:setInputNumber(31, simulator:getSlider(1))      -- set input 31 to the value of slider 1
-
-        simulator:setInputBool(32, simulator:getIsToggled(2))     -- make button 2 a toggle, for input.getBool(32)
-        simulator:setInputNumber(32, simulator:getSlider(2) * 50) -- set input 32 to the value from slider 2 * 50
-    end;
-end
----@endsection
-
-
---[====[ IN-GAME CODE ]====]
-
--- try require("Folder.Filename") to include code from another file in this, so you can store code in libraries
--- the "LifeBoatAPI" is included by default in /_build/libs/ - you can use require("LifeBoatAPI") to get this, and use all the LifeBoatAPI.<functions>!
 --[[
-    RWS/TWS/STTに加えて、3Dベクトル計算を用いた
-    高精度なACMモードを実装したレーダーシステムどす。
-    おおきに、ようおこし。
+    RWS/TWS/STT/ACMモードを搭載したレーダーシステム
+    物理ボタン、または画面タッチでモード切替が可能どす。
 ]]
 
 -- ライブラリとプロパティの読み込み
@@ -92,7 +46,7 @@ function onTick()
     local yaw_rad = Phys.compass * 2 * math.pi
     local forward_vec = {
         x = math.cos(pitch_rad) * math.sin(yaw_rad),
-        y = -math.sin(pitch_rad),
+        y = math.sin(pitch_rad),
         z = math.cos(pitch_rad) * math.cos(yaw_rad)
     }
 
@@ -126,24 +80,38 @@ function onTick()
         -- モード変更ロジック
         if (not InfoUpdate) then
             local tgtLock = gN(10) == 1
-            local mode_button_current = gN(11) == 1
             
-            -- ダブルクリック検知でACMモードへ
-            if mode_button_current and not acm_button_last_press then
-                if acm_button_timer > 0 then
-                    TrackMode = 5
+            -- ★ 修正: タッチパネルでのモード変更を復活させました
+            local touch_area_pressed = gB(1) and gN(3) <= 12 and gN(4) >= h - 5
+            local physical_button_pressed = gN(11) == 1
+            local mode_switch_input = touch_area_pressed or physical_button_pressed
+
+            -- モードボタンが押された瞬間の処理
+            if mode_switch_input and not acm_button_last_press then
+                if TrackMode == 5 then
+                    -- ★ ACMモード中に押されたらRWSモードに戻る
+                    TrackMode = 0
                     acm_button_timer = 0
                 else
-                    acm_button_timer = 20
+                    -- ACMモード以外ならダブルクリック判定を開始
+                    if acm_button_timer > 0 then
+                        -- ★ ダブルクリック成功: ACMモードへ移行しカーソルをリセット
+                        TrackMode = 5
+                        Cursor.X = 0
+                        Cursor.Y = 0
+                        acm_button_timer = 0
+                    else
+                        acm_button_timer = 10 -- シングルクリックの開始
+                    end
                 end
             end
-            acm_button_last_press = mode_button_current
+            acm_button_last_press = mode_switch_input
 
             if acm_button_timer > 0 then
                 acm_button_timer = acm_button_timer - 1
                 if acm_button_timer == 0 then -- 時間切れなら通常のTWS/RWS切替
-                    if TrackMode == 0 then TrackMode = 3
-                    elseif TrackMode == 3 then TrackMode = 0
+                    if TrackMode == 0 then TrackMode = 3      -- RWS -> TWS
+                    elseif TrackMode == 3 then TrackMode = 0   -- TWS -> RWS
                     end
                 end
             end
@@ -160,6 +128,8 @@ function onTick()
         if TrackMode == 5 then -- ACM
             FOV = 10
             SHOWDISTANCE = 10000
+            Cursor.X = 0
+            Cursor.Y = 0
         elseif TrackMode == 1 then -- ACQ
             FOV = 5
         elseif TrackMode == 2 then -- STT
@@ -205,9 +175,10 @@ function onTick()
                         local forward_vec_norm = normalize(forward_vec)
                         local target_vec_norm = normalize(target_vec)
                         local angle_cos = dot(forward_vec_norm, target_vec_norm)
-                        local threshold_cos = 0.9848 -- cos(10 degrees)
+                        local threshold_cos = math.sin(10 * math.pi / 180)-- cos(10 degrees)
+                        debug.log("$$" .. "angle_cos: " .. angle_cos .. "threshold_cos: " .. threshold_cos)
                         
-                        if angle_cos > threshold_cos then
+                        if math.abs(angle_cos) < threshold_cos then
                             local data_to_show = {
                                 x = data.x, y = data.y, z = data.z, vid = data.vid,
                                 distance = distance, bearing = getBearing(Phys, data, 0)
