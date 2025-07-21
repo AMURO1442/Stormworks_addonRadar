@@ -1,6 +1,6 @@
 --[[
     RWS/TWS/STT/ACMモードを搭載したレーダーシステム
-    ACMモードが即時解除される不具合と、ロックオン計算式を修正済み。
+    物理ボタン、または画面タッチでモード切替が可能どす。
 ]]
 
 -- ライブラリとプロパティの読み込み
@@ -33,10 +33,9 @@ w, h = 0, 0
 TrackModeold = 0
 InfoUpdate = false
 
--- モード切替用の変数
+-- ACMモードのダブルクリック検知用
 acm_button_timer = 0
 acm_button_last_press = false
-acm_cooldown = 0 -- ★ 修正: ACMモード移行直後の誤作動を防ぐクールダウンタイマー
 
 --------------------------------------------------------------------------------
 -- メインループ
@@ -50,11 +49,6 @@ function onTick()
         y = math.sin(pitch_rad),
         z = math.cos(pitch_rad) * math.cos(yaw_rad)
     }
-
-    -- ★ 修正: クールダウンタイマーを毎フレーム減らす
-    if acm_cooldown > 0 then
-        acm_cooldown = acm_cooldown - 1
-    end
 
     -- 物理データ入力
     if gB(29) then
@@ -79,6 +73,7 @@ function onTick()
             InfoUpdate = false
         end
         
+        -- スキャン範囲の基本設定
         FOV = gN(5) == 0 and property.getNumber("FOV (degree)") / 2 or gN(5) / 2
         SHOWDISTANCE = gN(6) == 0 and property.getNumber("ViewDistance(m)") or gN(6)
 
@@ -86,24 +81,27 @@ function onTick()
         if (not InfoUpdate) then
             local tgtLock = gN(10) == 1
             
-            local touch_area_pressed = h > 0 and gB(1) and gN(3) <= 12 and gN(4) >= h - 5
+            -- ★ 修正: タッチパネルでのモード変更を復活させました
+            local touch_area_pressed = gB(1) and gN(3) <= 12 and gN(4) >= h - 5
             local physical_button_pressed = gN(11) == 1
             local mode_switch_input = touch_area_pressed or physical_button_pressed
 
-            -- ★ 修正: クールダウン中はモード切替を受け付けないようにする
-            if mode_switch_input and not acm_button_last_press and acm_cooldown == 0 then
+            -- モードボタンが押された瞬間の処理
+            if mode_switch_input and not acm_button_last_press then
                 if TrackMode == 5 then
+                    -- ★ ACMモード中に押されたらRWSモードに戻る
                     TrackMode = 0
                     acm_button_timer = 0
                 else
+                    -- ACMモード以外ならダブルクリック判定を開始
                     if acm_button_timer > 0 then
+                        -- ★ ダブルクリック成功: ACMモードへ移行しカーソルをリセット
                         TrackMode = 5
                         Cursor.X = 0
                         Cursor.Y = 0
                         acm_button_timer = 0
-                        acm_cooldown = 5 -- ACMへ移行後、5フレームは入力を無視
                     else
-                        acm_button_timer = 20
+                        acm_button_timer = 5 -- シングルクリックの開始
                     end
                 end
             end
@@ -111,15 +109,15 @@ function onTick()
 
             if acm_button_timer > 0 then
                 acm_button_timer = acm_button_timer - 1
-                if acm_button_timer == 0 then
-                    if TrackMode == 0 then TrackMode = 3
-                    elseif TrackMode == 3 then TrackMode = 0
+                if acm_button_timer == 0 then -- 時間切れなら通常のTWS/RWS切替
+                    if TrackMode == 0 then TrackMode = 3      -- RWS -> TWS
+                    elseif TrackMode == 3 then TrackMode = 0   -- TWS -> RWS
                     end
                 end
             end
 
-            -- ロックオンボタンによるモード遷移
-            if tgtLock and TrackMode == 0 then TrackMode = 1
+            -- 通常のモード遷移
+            if not modechange and tgtLock and TrackMode == 0 then TrackMode = 1
             elseif tgtLock and TrackMode == 2 then TrackMode = 0
             elseif not tgtLock and TrackMode == 1 then TrackMode = 0
             elseif TrackMode == 4 and (gB(1) or gN(8) ~= 0 or gN(9) ~= 0) then TrackMode = 3
@@ -127,12 +125,14 @@ function onTick()
         end
         
         -- 各モード用のパラメータ設定
-        if TrackMode == 5 then
-            FOV = 10
+        if TrackMode == 5 then -- ACM
+            FOV = 15
             SHOWDISTANCE = 5000
-        elseif TrackMode == 1 then
+            Cursor.X = 0
+            Cursor.Y = 0
+        elseif TrackMode == 1 then -- ACQ
             FOV = 5
-        elseif TrackMode == 2 then
+        elseif TrackMode == 2 then -- STT
             FOV = MaxFOV
         end
 
@@ -169,14 +169,14 @@ function onTick()
                 local distance = getDistance(Phys, data)
 
                 if (distance <= SHOWDISTANCE) then
+                    -- ACMモードの処理 (3Dベクトル)
                     if TrackMode == 5 then
                         local target_vec = { x = data.x - Phys.gpsX, y = data.y - Phys.alt, z = data.z - Phys.gpsY }
                         local forward_vec_norm = normalize(forward_vec)
                         local target_vec_norm = normalize(target_vec)
                         local angle_cos = dot(forward_vec_norm, target_vec_norm)
-                        
-                        -- ★ 修正: ロックオンの計算式を正しいものに戻しました
-                        local threshold_cos = math.sin(10 * math.pi / 180) -- cos(10度) is ~0.9848
+                        local threshold_cos = math.sin(10 * math.pi / 180)
+                        --debug.log("$$" .. "angle_cos: " .. angle_cos .. "threshold_cos: " .. threshold_cos)
                         
                         if math.abs(angle_cos) < threshold_cos then
                             local data_to_show = {
@@ -188,6 +188,7 @@ function onTick()
                             TrackMode = 2 -- STTへ移行
                             break
                         end
+                    -- RWS/TWS/STTの処理 (水平面方位)
                     else
                         local bearing = getBearing(Phys, data, Cursor.RdrAzimath / 2)
                         
@@ -219,9 +220,10 @@ function onTick()
             end
         end
 
-        -- ターゲット追跡とロスト処理 (変更なし)
+        -- ターゲット追跡とロスト処理
         local target_found_in_stt = false
         local target_found_in_tws = false
+
         for _, data in ipairs(ShowData) do
             if TrackMode == 4 and TrackVid == data.vid then
                 Cursor.X = data.bearing / MaxFOV
@@ -244,8 +246,9 @@ function onTick()
         end
     end
 
-    -- 出力処理 (変更なし)
+    -- 出力処理
     if gB(29) then
+        -- (コメントアウト)
     elseif gB(28) then
         output.setBool(28, true)
     else
@@ -267,6 +270,7 @@ function onTick()
         output.setBool(28, false)
         output.setBool(29, false)
     end
+    
     output.setBool(31, TrackMode == 2 or TrackMode == 4)
     sN(6, TrackMode)
     sN(7, TrackVid or 0)
@@ -274,14 +278,18 @@ function onTick()
 end
 
 --------------------------------------------------------------------------------
--- 描画 (変更なし)
+-- 描画
 --------------------------------------------------------------------------------
 function onDraw()
     w, h = screen.getWidth(), screen.getHeight()
+    
+    -- 背景
     screen.setColor(bgR, bgG, bgB, 90)
     screen.drawRectF(0, 0, w, h)
     screen.setColor(bgR, bgG, bgB, 95)
     screen.drawRectF(TrackMode == 2 and 0 or w/2*(1-(FOV/MaxFOV)+Cursor.RdrAzimath*(180/MaxFOV)), 0, w*(FOV/MaxFOV), h)
+    
+    -- フレーム
     screen.setColor(flR, flG, flB)
     screen.drawRect(0, 0, w - 1, h - 1)
     screen.drawRect(w / 7, 0, w * 5 / 7, h - 1)
@@ -289,6 +297,8 @@ function onDraw()
     screen.drawRect(w * 3 / 7, 0, w / 7, h - 1)
     screen.drawRect(0, h / 4, w - 1, h / 2)
     screen.drawLine(0, h / 2, w - 1, h / 2)
+    
+    -- モード表示
     screen.setColor(tgR, tgG, tgB)
     local mode_text = "ERR"
     if TrackMode == 0 then mode_text = "RWS"
@@ -298,22 +308,29 @@ function onDraw()
     elseif TrackMode == 5 then mode_text = "ACM"
     end
     screen.drawText(0, h - 5, mode_text)
+
+    -- カーソル
     if TrackMode == 0 or TrackMode == 3 or TrackMode == 4 then
         local cX, cY = Cursor.X * w / 2 + w / 2, Cursor.Y * h / 2 + h / 2
         screen.drawLine(cX - w/32, cY - h/32, cX - w/32, cY + h/32)
         screen.drawLine(cX + w/32, cY - h/32, cX + w/32, cY + h/32)
         if TrackMode == 4 then screen.drawText(w - 12, h - 5, "Lck") end
     end
+
+    -- ACMスキャン範囲
     if TrackMode == 5 then
         local acm_box_w = w / 8
         screen.setColor(flR, flG, flB)
         screen.drawRect(w / 2 - acm_box_w / 2, h / 8, acm_box_w, h * 3 / 4)
     end
+    
+    -- ターゲット
     screen.setColor(tgR, tgG, tgB)
     for _, data in ipairs(ShowData) do
         local targetX = w / 2 - w / 64 + (data.bearing / MaxFOV) * w / 2
         local targetY = h * (1 - (data.distance / SHOWDISTANCE))
         screen.drawRectF(targetX, targetY, w / 32, h / 32)
+
         if TrackMode == 2 and data.vid == TrackVid then
             screen.setColor(bgR, bgG, bgB, 95)
             local lineX = w / 2 + (data.bearing / MaxFOV) * w / 2
@@ -324,16 +341,22 @@ function onDraw()
 end
 
 --------------------------------------------------------------------------------
--- ヘルパー関数 (変更なし)
+-- ヘルパー関数
 --------------------------------------------------------------------------------
+
+-- 値を範囲内に収める
 function clamp(value, min, Max)
     return math.min(math.max(value, min), Max)
 end
+
+-- 距離計算
 function getDistance(PhysData, Target)
     local sx, sy, sz = PhysData.gpsX, PhysData.alt, PhysData.gpsY
     local tx, ty, tz = Target.x, Target.y, Target.z
     return math.sqrt((sx - tx)^2 + (sy - ty)^2 + (sz - tz)^2)
 end
+
+-- 水平面の方位角計算
 function getBearing(physData, target, azimath)
     local sx, sz = physData.gpsX, physData.gpsY
     local tx, tz = target.x, target.z
@@ -342,12 +365,16 @@ function getBearing(physData, target, azimath)
     local final_bearing = bearing_deg + ((physData.compass - azimath) % 1) * 360
     return set_deg(final_bearing)
 end
+
+-- 角度を-180～180に正規化
 function set_deg(angle)
     angle = angle % 360
     if angle > 180 then angle = angle - 360
     elseif angle < -180 then angle = angle + 360 end
     return angle
 end
+
+-- ベクトルを正規化 (長さを1に)
 function normalize(vec)
     local len = math.sqrt(vec.x^2 + vec.y^2 + vec.z^2)
     if len > 0 then
@@ -355,6 +382,8 @@ function normalize(vec)
     end
     return { x = 0, y = 0, z = 1 }
 end
+
+-- 2つのベクトルの内積を計算
 function dot(v1, v2)
     return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z
 end
